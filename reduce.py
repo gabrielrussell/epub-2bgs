@@ -224,6 +224,8 @@ def process_epub(epub_path, output_dir):
                 print("Updating file references...")
                 
                 # Update HTML/XHTML files
+                for htm_file in extract_dir.rglob('*.htm'):
+                    update_xml_references(htm_file, image_mapping)
                 for html_file in extract_dir.rglob('*.html'):
                     update_xml_references(html_file, image_mapping)
                 for xhtml_file in extract_dir.rglob('*.xhtml'):
