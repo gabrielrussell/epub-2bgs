@@ -11,9 +11,101 @@ from PIL import Image
 import xml.etree.ElementTree as ET
 import re
 from collections import defaultdict
+from PIL.ExifTags import TAGS
 
-def create_4bit_grayscale_png(input_path, output_path):
-    """Convert image to 4-bit grayscale PNG"""
+def get_image_metadata(img_path, verbose=False):
+    """Extract and display image metadata"""
+    if not verbose:
+        return
+
+    try:
+        with Image.open(img_path) as img:
+            file_size = img_path.stat().st_size
+            print(f"    Original: {img.format} {img.size[0]}x{img.size[1]} {img.mode} ({file_size/1024:.1f} KB)")
+
+            # JPEG-specific metadata
+            if img.format == 'JPEG':
+                # Quality estimation (approximate)
+                quality = "unknown"
+                if hasattr(img, 'quantization'):
+                    q_tables = img.quantization
+                    if q_tables and len(q_tables) > 0:
+                        # Rough quality estimation based on quantization table
+                        q_sum = sum(sum(table) for table in q_tables.values())
+                        if q_sum < 1000:
+                            quality = "high (90-100)"
+                        elif q_sum < 2000:
+                            quality = "good (70-89)"
+                        elif q_sum < 4000:
+                            quality = "medium (50-69)"
+                        else:
+                            quality = "low (<50)"
+
+                print(f"    JPEG quality: {quality}")
+
+                # Check for progressive encoding
+                is_progressive = getattr(img, 'is_progressive', False)
+                print(f"    Progressive: {is_progressive}")
+
+                # EXIF data that affects size
+                if hasattr(img, '_getexif') and img._getexif():
+                    exif = img._getexif()
+                    exif_size = len(str(exif)) if exif else 0
+                    print(f"    EXIF data: {exif_size} bytes")
+
+                    # Show some key EXIF tags that might indicate large metadata
+                    size_relevant_tags = ['ColorSpace', 'WhiteBalance', 'Software', 'Artist', 'Copyright']
+                    for tag_id, value in exif.items():
+                        tag_name = TAGS.get(tag_id, tag_id)
+                        if tag_name in size_relevant_tags and len(str(value)) > 10:
+                            print(f"    {tag_name}: {str(value)[:50]}...")
+
+            # PNG-specific metadata
+            elif img.format == 'PNG':
+                if hasattr(img, 'info') and img.info:
+                    print(f"    PNG metadata: {len(str(img.info))} bytes")
+
+    except Exception as e:
+        print(f"    Error reading metadata: {e}")
+
+def floyd_steinberg_dither(img, levels):
+    """Apply Floyd-Steinberg dithering to reduce to specified levels"""
+    # Work directly with PIL pixel access for performance
+    width, height = img.size
+    pixels = img.load()
+
+    # Calculate quantization step
+    step = 255.0 / (levels - 1)
+
+    for y in range(height):
+        for x in range(width):
+            old_pixel = float(pixels[x, y])
+            new_pixel = round(old_pixel / step) * step
+            pixels[x, y] = int(max(0, min(255, new_pixel)))
+
+            error = old_pixel - new_pixel
+
+            # Distribute error to neighboring pixels using Floyd-Steinberg weights
+            if x + 1 < width:
+                right_pixel = float(pixels[x + 1, y])
+                pixels[x + 1, y] = int(max(0, min(255, right_pixel + error * 7/16)))
+
+            if y + 1 < height:
+                if x > 0:
+                    bottom_left_pixel = float(pixels[x - 1, y + 1])
+                    pixels[x - 1, y + 1] = int(max(0, min(255, bottom_left_pixel + error * 3/16)))
+
+                bottom_pixel = float(pixels[x, y + 1])
+                pixels[x, y + 1] = int(max(0, min(255, bottom_pixel + error * 5/16)))
+
+                if x + 1 < width:
+                    bottom_right_pixel = float(pixels[x + 1, y + 1])
+                    pixels[x + 1, y + 1] = int(max(0, min(255, bottom_right_pixel + error * 1/16)))
+
+    return img
+
+def create_2bit_grayscale_png(input_path, output_path, verbose=False):
+    """Convert image to 2-bit grayscale PNG with Floyd-Steinberg dithering"""
     try:
         with Image.open(input_path) as img:
             # Convert to grayscale and remove any color profiles
@@ -23,23 +115,12 @@ def create_4bit_grayscale_png(input_path, output_path):
             clean_img = Image.new('L', grayscale.size)
             clean_img.paste(grayscale)
 
-            # Manually reduce to 4-bit by dividing by 16 and multiplying back
-            # This ensures proper mapping without palette confusion
-            pixels = clean_img.load()
-            width, height = clean_img.size
-
-            for y in range(height):
-                for x in range(width):
-                    # Map 0-255 to 0-15 levels and back to 0-255
-                    level = pixels[x, y] // 16
-                    if level > 15:
-                        level = 15
-                    new_value = int(level * 255 / 15)
-                    pixels[x, y] = new_value
+            # Apply Floyd-Steinberg dithering to reduce to 4 levels (2-bit)
+            dithered_img = floyd_steinberg_dither(clean_img, 4)
 
             # Save as PNG without color profiles to avoid sRGB warnings
             pnginfo = None  # Remove any existing metadata/profiles
-            clean_img.save(output_path, 'PNG', optimize=True, pnginfo=pnginfo)
+            dithered_img.save(output_path, 'PNG', optimize=True, pnginfo=pnginfo)
             return True
     except Exception as e:
         print(f"Error converting {input_path}: {e}")
@@ -164,7 +245,7 @@ def update_opf_manifest(file_path, image_mapping):
         print(f"Error updating OPF manifest in {file_path}: {e}")
     return False
 
-def process_epub(epub_path, output_dir):
+def process_epub(epub_path, output_dir, verbose=False):
     """Process a single EPUB file"""
     epub_path = Path(epub_path)
     if not epub_path.exists():
@@ -198,22 +279,32 @@ def process_epub(epub_path, output_dir):
             
             for img_file in extract_dir.rglob('*'):
                 if img_file.is_file() and img_file.suffix.lower() in image_extensions:
+                    # Show metadata in verbose mode
+                    if verbose:
+                        print(f"  Processing {img_file.name}:")
+                        get_image_metadata(img_file, verbose)
+
                     # Create PNG equivalent path
                     new_name = img_file.stem + '.png'
                     new_path = img_file.parent / new_name
-                    
-                    # Convert to 4-bit grayscale PNG
-                    if create_4bit_grayscale_png(img_file, new_path):
+
+                    # Convert to 2-bit grayscale PNG with Floyd-Steinberg dithering
+                    if create_2bit_grayscale_png(img_file, new_path, verbose):
                         # Store mapping for reference updating
                         rel_old_path = str(img_file.relative_to(extract_dir))
                         rel_new_path = str(new_path.relative_to(extract_dir))
                         image_mapping[rel_old_path] = rel_new_path
-                        
+
                         # Remove original if different format
                         if img_file.suffix.lower() != '.png':
                             img_file.unlink()
-                        
-                        print(f"  Converted {img_file.name} -> {new_name}")
+
+                        # Show conversion result
+                        if verbose:
+                            new_size = new_path.stat().st_size
+                            print(f"    Converted: 2-bit grayscale PNG with Floyd-Steinberg dithering ({new_size/1024:.1f} KB)")
+                        else:
+                            print(f"  Converted {img_file.name} -> {new_name}")
             
             if not image_mapping:
                 print("  No images found to process")
@@ -275,10 +366,11 @@ def process_epub(epub_path, output_dir):
             return False
 
 def main():
-    parser = argparse.ArgumentParser(description='Reduce EPUB file sizes by converting images to 4-bit grayscale PNG')
+    parser = argparse.ArgumentParser(description='Reduce EPUB file sizes by converting images to 2-bit grayscale PNG with Floyd-Steinberg dithering')
     parser.add_argument('epubs', nargs='+', help='EPUB file(s) to process')
     parser.add_argument('-o', '--output', default='output', help='Output directory (default: output)')
-    
+    parser.add_argument('-v', '--verbose', action='store_true', help='Show detailed image metadata')
+
     args = parser.parse_args()
     
     # Create output directory
@@ -291,7 +383,7 @@ def main():
     
     for epub_path in args.epubs:
         print("=" * 50)
-        if process_epub(epub_path, output_dir):
+        if process_epub(epub_path, output_dir, args.verbose):
             successful += 1
         else:
             failed += 1
