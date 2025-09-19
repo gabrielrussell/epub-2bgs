@@ -13,6 +13,13 @@ import re
 from collections import defaultdict
 from PIL.ExifTags import TAGS
 
+def is_ideal_target(pixel_value, target_levels, tolerance=5):
+    """Check if a pixel value is already close to an ideal quantization target"""
+    for target in target_levels:
+        if abs(pixel_value - target) <= tolerance:
+            return True
+    return False
+
 def get_image_metadata(img_path, verbose=False):
     """Extract and display image metadata"""
     if not verbose:
@@ -68,39 +75,125 @@ def get_image_metadata(img_path, verbose=False):
     except Exception as e:
         print(f"    Error reading metadata: {e}")
 
-def floyd_steinberg_dither(img, levels):
+def floyd_steinberg_dither(img, levels, debug=False):
     """Apply Floyd-Steinberg dithering to reduce to specified levels"""
     # Work directly with PIL pixel access for performance
     width, height = img.size
     pixels = img.load()
 
+    # Store original pixel values to prevent error diffusion into ideal targets
+    original_pixels = {}
+    for y in range(height):
+        for x in range(width):
+            original_pixels[(x, y)] = float(pixels[x, y])
+
     # Calculate quantization step
     step = 255.0 / (levels - 1)
+
+    # Target quantization levels
+    target_levels = [0, 85, 170, 255]
+
+    # Debug statistics
+    pixel_counts = {0: 0, 85: 0, 170: 0, 255: 0}  # 4-level counts
+    threshold_counts = {"near_white": 0, "near_black": 0, "quantized": 0}
+    error_distribution = []
+    original_histogram = {}  # Track what original values we're seeing
+    blocked_diffusions = 0  # Count how many error diffusions we block
 
     for y in range(height):
         for x in range(width):
             old_pixel = float(pixels[x, y])
-            new_pixel = round(old_pixel / step) * step
+
+            # Track original pixel distribution for debugging
+            if debug:
+                val = int(old_pixel)
+                original_histogram[val] = original_histogram.get(val, 0) + 1
+
+                # Track specific white pixel processing
+                if old_pixel == 255.0 and y < 50 and x < 50:  # Sample upper-left white area
+                    print(f"      WHITE PIXEL ({x},{y}): original=255, processing...")
+
+            # Threshold near-white and near-black to avoid unnecessary dithering
+            if old_pixel >= 240:  # Near-white threshold
+                new_pixel = 255.0
+                threshold_counts["near_white"] += 1
+            elif old_pixel <= 15:  # Near-black threshold
+                new_pixel = 0.0
+                threshold_counts["near_black"] += 1
+            else:
+                new_pixel = round(old_pixel / step) * step
+                threshold_counts["quantized"] += 1
+
             pixels[x, y] = int(max(0, min(255, new_pixel)))
 
             error = old_pixel - new_pixel
 
+            # Track statistics for debugging
+            if debug:
+                pixel_counts[int(new_pixel)] = pixel_counts.get(int(new_pixel), 0) + 1
+                if abs(error) > 10:  # Only track significant errors
+                    error_distribution.append((x, y, old_pixel, new_pixel, error))
+
             # Distribute error to neighboring pixels using Floyd-Steinberg weights
+            # But only if the target pixel isn't already at an ideal value
             if x + 1 < width:
-                right_pixel = float(pixels[x + 1, y])
-                pixels[x + 1, y] = int(max(0, min(255, right_pixel + error * 7/16)))
+                orig_val = original_pixels.get((x + 1, y), 0)
+                if not is_ideal_target(orig_val, target_levels):
+                    right_pixel = float(pixels[x + 1, y])
+                    pixels[x + 1, y] = int(max(0, min(255, right_pixel + error * 7/16)))
+                elif debug:
+                    blocked_diffusions += 1
 
             if y + 1 < height:
                 if x > 0:
-                    bottom_left_pixel = float(pixels[x - 1, y + 1])
-                    pixels[x - 1, y + 1] = int(max(0, min(255, bottom_left_pixel + error * 3/16)))
+                    orig_val = original_pixels.get((x - 1, y + 1), 0)
+                    if not is_ideal_target(orig_val, target_levels):
+                        bottom_left_pixel = float(pixels[x - 1, y + 1])
+                        pixels[x - 1, y + 1] = int(max(0, min(255, bottom_left_pixel + error * 3/16)))
+                    elif debug:
+                        blocked_diffusions += 1
 
-                bottom_pixel = float(pixels[x, y + 1])
-                pixels[x, y + 1] = int(max(0, min(255, bottom_pixel + error * 5/16)))
+                orig_val = original_pixels.get((x, y + 1), 0)
+                if not is_ideal_target(orig_val, target_levels):
+                    bottom_pixel = float(pixels[x, y + 1])
+                    pixels[x, y + 1] = int(max(0, min(255, bottom_pixel + error * 5/16)))
+                elif debug:
+                    blocked_diffusions += 1
 
                 if x + 1 < width:
-                    bottom_right_pixel = float(pixels[x + 1, y + 1])
-                    pixels[x + 1, y + 1] = int(max(0, min(255, bottom_right_pixel + error * 1/16)))
+                    orig_val = original_pixels.get((x + 1, y + 1), 0)
+                    if not is_ideal_target(orig_val, target_levels):
+                        bottom_right_pixel = float(pixels[x + 1, y + 1])
+                        pixels[x + 1, y + 1] = int(max(0, min(255, bottom_right_pixel + error * 1/16)))
+                    elif debug:
+                        blocked_diffusions += 1
+
+    # Print debug information
+    if debug:
+        print(f"    Debug: Image {width}x{height}")
+        print(f"    Threshold counts: {threshold_counts}")
+        print(f"    Final pixel distribution: {pixel_counts}")
+
+        # Show original pixel value distribution
+        print(f"    Original pixel histogram (values with >100 pixels):")
+        for val in sorted(original_histogram.keys()):
+            count = original_histogram[val]
+            if count > 100:
+                if val >= 240:
+                    status = " (near-white)"
+                elif val <= 15:
+                    status = " (near-black)"
+                else:
+                    status = " (quantized)"
+                print(f"      {val}: {count} pixels{status}")
+
+        print(f"    Blocked error diffusions: {blocked_diffusions}")
+
+        if error_distribution:
+            print(f"    Large errors (>{10}): {len(error_distribution)} pixels")
+            # Show first few examples
+            for i, (x, y, old, new, err) in enumerate(error_distribution[:5]):
+                print(f"      ({x},{y}): {old:.1f} -> {new:.1f} (error: {err:.1f})")
 
     return img
 
@@ -108,15 +201,24 @@ def create_2bit_grayscale_png(input_path, output_path, verbose=False):
     """Convert image to 2-bit grayscale PNG with Floyd-Steinberg dithering"""
     try:
         with Image.open(input_path) as img:
+            if verbose:
+                print(f"    Original format: {img.format}, mode: {img.mode}, size: {img.size}")
+
             # Convert to grayscale and remove any color profiles
             grayscale = img.convert('L')
+
+            if verbose:
+                print(f"    After grayscale conversion: mode: {grayscale.mode}")
+                # Sample a few pixels to see what we're getting
+                pixels = grayscale.load()
+                print(f"    Sample pixels: (0,0)={pixels[0,0]}, (10,10)={pixels[10,10]}, (50,50)={pixels[50,50]}")
 
             # Create a new image to ensure clean profile
             clean_img = Image.new('L', grayscale.size)
             clean_img.paste(grayscale)
 
             # Apply Floyd-Steinberg dithering to reduce to 4 levels (2-bit)
-            dithered_img = floyd_steinberg_dither(clean_img, 4)
+            dithered_img = floyd_steinberg_dither(clean_img, 4, debug=verbose)
 
             # Save as PNG without color profiles to avoid sRGB warnings
             pnginfo = None  # Remove any existing metadata/profiles
