@@ -18,29 +18,28 @@ def create_4bit_grayscale_png(input_path, output_path):
         with Image.open(input_path) as img:
             # Convert to grayscale and remove any color profiles
             grayscale = img.convert('L')
-            
+
             # Create a new image to ensure clean profile
             clean_img = Image.new('L', grayscale.size)
             clean_img.paste(grayscale)
-            
-            # Reduce to 4-bit (16 levels) using quantization
-            quantized = clean_img.quantize(colors=16, method=Image.Quantize.MEDIANCUT)
-            
-            # Create a clean grayscale palette for 16 levels
-            palette = []
-            for i in range(16):
-                gray_value = int(i * 255 / 15)
-                palette.extend([gray_value, gray_value, gray_value])
-            
-            # Pad palette to 256 colors (RGB triplets)
-            while len(palette) < 768:
-                palette.append(0)
-            
-            quantized.putpalette(palette)
-            
+
+            # Manually reduce to 4-bit by dividing by 16 and multiplying back
+            # This ensures proper mapping without palette confusion
+            pixels = clean_img.load()
+            width, height = clean_img.size
+
+            for y in range(height):
+                for x in range(width):
+                    # Map 0-255 to 0-15 levels and back to 0-255
+                    level = pixels[x, y] // 16
+                    if level > 15:
+                        level = 15
+                    new_value = int(level * 255 / 15)
+                    pixels[x, y] = new_value
+
             # Save as PNG without color profiles to avoid sRGB warnings
             pnginfo = None  # Remove any existing metadata/profiles
-            quantized.save(output_path, 'PNG', optimize=True, pnginfo=pnginfo)
+            clean_img.save(output_path, 'PNG', optimize=True, pnginfo=pnginfo)
             return True
     except Exception as e:
         print(f"Error converting {input_path}: {e}")
