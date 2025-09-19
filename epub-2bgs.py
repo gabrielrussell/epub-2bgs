@@ -81,17 +81,21 @@ def floyd_steinberg_dither(img, levels, debug=False):
     width, height = img.size
     pixels = img.load()
 
-    # Store original pixel values to prevent error diffusion into ideal targets
-    original_pixels = {}
+    # Store original pixel values as a 2D list for faster access
+    original_pixels = []
     for y in range(height):
+        row = []
         for x in range(width):
-            original_pixels[(x, y)] = float(pixels[x, y])
+            row.append(pixels[x, y])
+        original_pixels.append(row)
 
     # Calculate quantization step
     step = 255.0 / (levels - 1)
 
-    # Target quantization levels
-    target_levels = [0, 85, 170, 255]
+    # Pre-calculate ideal target check to avoid function calls
+    def is_near_target(val):
+        return (abs(val - 0) <= 5 or abs(val - 85) <= 5 or
+                abs(val - 170) <= 5 or abs(val - 255) <= 5)
 
     # Debug statistics
     pixel_counts = {0: 0, 85: 0, 170: 0, 255: 0}  # 4-level counts
@@ -137,34 +141,30 @@ def floyd_steinberg_dither(img, levels, debug=False):
             # Distribute error to neighboring pixels using Floyd-Steinberg weights
             # But only if the target pixel isn't already at an ideal value
             if x + 1 < width:
-                orig_val = original_pixels.get((x + 1, y), 0)
-                if not is_ideal_target(orig_val, target_levels):
-                    right_pixel = float(pixels[x + 1, y])
-                    pixels[x + 1, y] = int(max(0, min(255, right_pixel + error * 7/16)))
+                if not is_near_target(original_pixels[y][x + 1]):
+                    right_pixel = pixels[x + 1, y]
+                    pixels[x + 1, y] = max(0, min(255, int(right_pixel + error * 7/16)))
                 elif debug:
                     blocked_diffusions += 1
 
             if y + 1 < height:
                 if x > 0:
-                    orig_val = original_pixels.get((x - 1, y + 1), 0)
-                    if not is_ideal_target(orig_val, target_levels):
-                        bottom_left_pixel = float(pixels[x - 1, y + 1])
-                        pixels[x - 1, y + 1] = int(max(0, min(255, bottom_left_pixel + error * 3/16)))
+                    if not is_near_target(original_pixels[y + 1][x - 1]):
+                        bottom_left_pixel = pixels[x - 1, y + 1]
+                        pixels[x - 1, y + 1] = max(0, min(255, int(bottom_left_pixel + error * 3/16)))
                     elif debug:
                         blocked_diffusions += 1
 
-                orig_val = original_pixels.get((x, y + 1), 0)
-                if not is_ideal_target(orig_val, target_levels):
-                    bottom_pixel = float(pixels[x, y + 1])
-                    pixels[x, y + 1] = int(max(0, min(255, bottom_pixel + error * 5/16)))
+                if not is_near_target(original_pixels[y + 1][x]):
+                    bottom_pixel = pixels[x, y + 1]
+                    pixels[x, y + 1] = max(0, min(255, int(bottom_pixel + error * 5/16)))
                 elif debug:
                     blocked_diffusions += 1
 
                 if x + 1 < width:
-                    orig_val = original_pixels.get((x + 1, y + 1), 0)
-                    if not is_ideal_target(orig_val, target_levels):
-                        bottom_right_pixel = float(pixels[x + 1, y + 1])
-                        pixels[x + 1, y + 1] = int(max(0, min(255, bottom_right_pixel + error * 1/16)))
+                    if not is_near_target(original_pixels[y + 1][x + 1]):
+                        bottom_right_pixel = pixels[x + 1, y + 1]
+                        pixels[x + 1, y + 1] = max(0, min(255, int(bottom_right_pixel + error * 1/16)))
                     elif debug:
                         blocked_diffusions += 1
 
