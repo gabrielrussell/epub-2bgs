@@ -137,17 +137,28 @@ def update_xml_references(file_path, image_mapping):
             old_filename = os.path.basename(old_path)
             new_filename = os.path.basename(new_path)
             
-            # Update src attributes
+            # Update src attributes and href attributes (for cover references)
             patterns = [
                 rf'src="([^"]*/{re.escape(old_filename)})"',
                 rf"src='([^']*/{re.escape(old_filename)})'",
                 rf'src="(images/{re.escape(old_filename)})"',
                 rf'src="(\.\./images/{re.escape(old_filename)})"',
-                rf'src="(\./images/{re.escape(old_filename)})"'
+                rf'src="(\./images/{re.escape(old_filename)})"',
+                rf'src="({re.escape(old_filename)})"',
+                rf"src='({re.escape(old_filename)})'",
+                rf'href="([^"]*/{re.escape(old_filename)})"',
+                rf"href='([^']*/{re.escape(old_filename)})'",
+                rf'href="(images/{re.escape(old_filename)})"',
+                rf'href="(\.\./images/{re.escape(old_filename)})"',
+                rf'href="(\./images/{re.escape(old_filename)})"',
+                rf'href="({re.escape(old_filename)})"',
+                rf"href='({re.escape(old_filename)})'"
             ]
             
             for pattern in patterns:
-                new_content = re.sub(pattern, lambda m: f'src="{m.group(1).replace(old_filename, new_filename)}"', content)
+                # Determine if this is src or href attribute
+                attr_name = 'href' if pattern.startswith(r'href') else 'src'
+                new_content = re.sub(pattern, lambda m: f'{attr_name}="{m.group(1).replace(old_filename, new_filename)}"', content)
                 if new_content != content:
                     content = new_content
                     modified = True
